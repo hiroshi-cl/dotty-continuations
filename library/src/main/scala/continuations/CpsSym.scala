@@ -1,0 +1,3 @@
+package continuations
+import scala.annotation.StaticAnnotation
+class CpsSym extends StaticAnnotation
