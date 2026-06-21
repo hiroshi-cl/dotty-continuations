@@ -222,18 +222,39 @@ def hasDirectCpsContextFunctionStorageLeaf(tpe: Type)(using Context): Boolean =
 def isCpsValType(tpe: Type)(using Context): Boolean =
 ```
 
-CPS 値型を検出する。まず `isControlContextType(t)` を除外する（ControlContext 自体は CPS value として再変換しない）。残りで次のいずれかを満たせば true。
+CPS 値型を検出する。内部的にはサイクルガード付きの `isCpsValType0(tpe, visited: Set[Int])` へ委譲する。`visited` はシンボル ID の集合であり `cpsApplyMember0` の再帰で使用される。
 
-- 型自体が `CpsTransform[R] ?=> A`。
+まず `isControlContextType(t)` を除外する（ControlContext 自体は CPS value として再変換しない）。残りで次のいずれかを満たせば true。
+
+- 型自体が `CpsTransform[R] ?=> A`（`isCpsTransformFunctionType`）。
 - `RefinedType` で、`apply` refined info または parent が CPS 値型。
 - `PolyType` の result type が CPS 値型。
-- `MethodType` の parameter info のどれか、または result type が CPS 値型。
+- `MethodType` の **result type のみ** が CPS 値型（`paramInfos` への再帰は行わない）。
 - `ExprType` の result type が CPS 値型。
-- `cpsApplyMember(t).nonEmpty`（`apply` member の型が CPS 値型）。
+- `cpsApplyMember0(t, visited).nonEmpty`（`apply` member の型が CPS 値型）。
 - function type で、型引数のどれかが CPS 値型。
 - 非関数 `AppliedType` で、tycon symbol が class、opaque ではなく、型引数のどれかが CPS 値型。
 
-**冒頭 `!isControlContextType(t)` ガードの意義**: `ControlContext` は `apply` メンバーを持つため、ガードなしでは `cpsApplyMember(t).nonEmpty` の分岐が `ControlContext` に対して true を返し、その `apply` の型に対して `isCpsValType` が再帰的に呼び出される。これを繰り返すと StackOverflow になる。先頭での除外によって無限再帰を防いでいる。
+**MethodType の `paramInfos` を除外する理由**: callable consumer （例: `(CpsTransform[R] ?=> A) => B`）は CPS 値を引数として受け取るが、そのメソッド自体は CPS 値型ではない。`paramInfos` に再帰すると、このような consumer が誤って CPS 値型として分類されてしまう。parameter が CPS を持つかは `hasCpsTransformFunctionParam` / `hasCpsValueContainerParam` 等の eligibility 判定で別途行う。
+
+**冒頭 `!isControlContextType(t)` ガードの意義**: `ControlContext` は `apply` メンバーを持つため、ガードなしでは `cpsApplyMember0` の分岐が `ControlContext` に対して true を返し、その `apply` の型に対して `isCpsValType0` が再帰的に呼び出される。visited set（シンボル ID ベース）でサイクルを検出して終端させるが、先頭での `isControlContextType` 除外によってそもそも再帰を防いでいる。
+
+**visited に `Set[Int]`（シンボル ID）を使う理由**: `Set[scala.Symbol]` と型名が衝突するため。
+
+### isMultiArgCpsContextFunctionTpe
+
+```scala
+private[plugin] def isMultiArgCpsContextFunctionTpe(tpe: Type)(using Context): Boolean =
+```
+
+CPS context function 型に `CpsTransform` と他の context parameter が混在するかを判定する。dealias 後に：
+
+- `isCpsTransformFunctionType(t) && t.argInfos.dropRight(1).size > 1` → true（context parameter が 2 個以上）。
+- `PolyType` の result type を再帰。
+- `MethodType` の各 parameter info および result type を再帰。
+- `ExprType` の result type を再帰。
+
+未サポートの context function 形状（例: `(CpsTransform[R], String) ?=> A`、`(String, CpsTransform[R]) ?=> A`）の早期診断に使用される。
 
 ### transformCpsValueType
 

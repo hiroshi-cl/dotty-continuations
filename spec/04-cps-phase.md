@@ -575,7 +575,11 @@ case Apply(prefix, Nil) if !transformedSym.info.isInstanceOf[MethodType] =>
 1. `sym.exists` が false なら `NoSymbol`。
 2. `lookupAnyLocalPlan(sym)` があれば、その `transformedSym`。
 3. `lookupLocalValPlan(sym)` があれば、その `transformedSym`。
-4. 名前に `"$transformed"` を付けた term 名を作り、`ownerSym.info.decl(tname).symbol` を返す（owner の補正あり: `sym.owner.isConstructor && sym.owner.owner.exists` なら `sym.owner.owner`）。
+4. 名前に `"$transformed"` を付けた term 名を作り、**alternatives ベース**で選択する（3段階）:
+   1. `ownerSym.info.decl(tname).alternatives.map(_.symbol)` で候補を列挙（owner の補正あり: `sym.owner.isConstructor && sym.owner.owner.exists` なら `sym.owner.owner`）。
+   2. `candidates.find(_.info =:= expectedType)` でシグネチャ一致を優先。
+   3. coord 一致が 1 件だけなら採用。
+   4. それも 1 件でなければ `candidates` が 1 件だけなら採用（後方互換 fallback）。
 
 ### `transformCpsCallSiteArg`
 
@@ -815,13 +819,15 @@ member lazy val CPS storage RHS cannot contain an immediately consumed CPS expre
 member lazy val CPS storage RHS cannot capture initializer prelude values; use a strict val or def
 ```
 
-**CpsBodyTransform**（`transformCpsRhs` 内）:
+**CpsBodyTransform**（`transTailValue` 内）:
 
 ```text
 class member def with CPS container parameter is not yet supported in CPS context
 ```
 
-発生条件: `Apply` の引数に `isContainerOfCpsAppliedType` な型が含まれており、かつ呼び出し先がクラスメンバーのとき、`transformCpsExpr` が変換できない場合。
+発生条件: `applySpineHasContainerCpsArg(app)` が true（Apply spine のどこかの引数に `isContainerOfCpsAppliedType` な型が含まれる）かつ Apply spine の根シンボルがクラスメンバー（非 module class）であるとき、`transformCpsExpr` が変換できなかった場合。エラー時は `Predef.undefined` を sentinel として返し cascading エラーを防ぐ。
+
+`applySpineHasContainerCpsArg` は `Apply(Apply(...), args)` の多引数リスト apply spine を再帰的に走査して検査する（従来の `app.args.exists` は最外 args のみ検査していたが、内側 clause の args も対象とする）。
 
 **LocalValueRewrite**:
 

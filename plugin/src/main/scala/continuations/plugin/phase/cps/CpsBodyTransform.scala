@@ -13,6 +13,19 @@ import dotty.tools.dotc.report
 trait CpsBodyTransformOps:
   self: SelectiveCPSTransform =>
 
+  private def applySpineHasContainerCpsArg(tree: Tree)(using Context): Boolean =
+    tree match
+      case Apply(fun, args) =>
+        args.exists(a => isContainerOfCpsAppliedType(a.tpe)) || applySpineHasContainerCpsArg(fun)
+      case TypeApply(fun, _) => applySpineHasContainerCpsArg(fun)
+      case _ => false
+
+  private def applySpineRootSym(tree: Tree)(using Context): Symbol =
+    tree match
+      case Apply(fun, _)    => applySpineRootSym(fun)
+      case TypeApply(fun, _) => applySpineRootSym(fun)
+      case t                => t.symbol
+
   protected[plugin] def transBody(rhs: Tree, pm: Map[Symbol, Symbol], rType: Type)(using Context): Tree =
     rhs match
       case Block(stmts, expr) => transBlock(stmts, expr, pm, rType)
@@ -212,10 +225,10 @@ trait CpsBodyTransformOps:
       case _ =>
         tree match
           case app: Apply
-              if app.args.exists(a => isContainerOfCpsAppliedType(a.tpe)) &&
-                app.fun.symbol.exists &&
-                app.fun.symbol.owner.isClass &&
-                !app.fun.symbol.owner.is(Flags.ModuleClass) =>
+              if applySpineHasContainerCpsArg(app) &&
+                applySpineRootSym(app).exists &&
+                applySpineRootSym(app).owner.isClass &&
+                !applySpineRootSym(app).owner.is(Flags.ModuleClass) =>
             val transformed = transformCpsExpr(app, pm)
             if transformed ne app then transformed
             else
@@ -223,6 +236,6 @@ trait CpsBodyTransformOps:
                 "class member def with CPS container parameter is not yet supported in CPS context",
                 app.srcPos
               )
-              app
+              tpd.ref(defn.Predef_undefined).ensureConforms(app.tpe)
           case _ =>
             tree

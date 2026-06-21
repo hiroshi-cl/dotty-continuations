@@ -198,7 +198,16 @@ trait CallsiteRewriteOps:
                 // shapes that expose a constructor-owned field symbol.
                 if sym.owner.isConstructor && sym.owner.owner.exists then sym.owner.owner
                 else sym.owner
-              ownerSym.info.decl(tname).symbol
+              val candidates = ownerSym.info.decl(tname).alternatives.map(_.symbol)
+              val expectedType = transformCpsMethodType(sym.info)
+              candidates.find(c => c.info =:= expectedType).getOrElse {
+                candidates.filter(_.coord == sym.coord) match
+                  case single :: Nil => single
+                  case _ =>
+                    candidates match
+                      case List(single) => single
+                      case _            => NoSymbol
+              }
 
   protected def findPolyApplyDef(tree: Tree)(using Context): Option[DefDef] =
     var result: Option[DefDef] = None
@@ -214,6 +223,27 @@ trait CallsiteRewriteOps:
               traverseChildren(tree)
     .traverse(tree)
     result
+
+  protected def findAllPolyApplyDefs(tree: Tree)(using Context): List[DefDef] =
+    val result = scala.collection.mutable.ListBuffer.empty[DefDef]
+    var classDepth = 0
+    new tpd.TreeTraverser:
+      override def traverse(tree: Tree)(using Context): Unit =
+        tree match
+          case td: TypeDef if td.isClassDef =>
+            classDepth += 1
+            traverseChildren(td)
+            classDepth -= 1
+          case dd: DefDef
+              if classDepth == 1 &&
+                dd.name == nme.apply &&
+                isCpsTransformFunctionType(dd.symbol.info.finalResultType) =>
+            result += dd
+          case _: DefDef => ()
+          case _ =>
+            traverseChildren(tree)
+    .traverse(tree)
+    result.toList
 
   protected def transformCpsCallSiteArg(arg: Tree, pm: Map[Symbol, Symbol] = Map.empty)(using ctx: Context): Tree =
     val argType = arg.tpe.widen

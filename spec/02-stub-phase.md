@@ -134,13 +134,24 @@ override def transformTemplate(tree: Template)(using ctx: Context): Tree
 - 生成したスタブは元 `ValDef` の直後に挿入する（`flatMap` による展開）
 - `isMutableMemberCpsVal(origSym)` が true なら setter も同位置に追加する
 
+### 事前検証パス（`$transformed` suffix 検査）
+
+`transformTemplate` は第1・第2段階の前に、テンプレート内の非 Synthetic `$transformed` 定義を検査する。
+
+条件: `dd.symbol.name.toString.endsWith("$transformed") && !dd.symbol.is(Flags.Synthetic)`
+
+- 対応する元 CPS メソッドが存在しない → `"manual $transformed definition requires a corresponding original CPS method"` エラー。
+- 元メソッドが存在するが、`dd.symbol.info =:= transformCpsMethodType(alt.symbol.info)` を満たすオーバーロードがない → 互換シグネチャが必要である旨のエラー（期待シグネチャを併記）。
+
 ### 第2段階: `DefDef` スタブの収集
 
 `tree.body.flatMap` で `needsTransformedStub(dd.symbol)` に合致する `DefDef` を走査する。
 
-- `hasUnsupportedDirectCpsTransformParam(dd.symbol)` が true ならエラーを報告しスタブを生成しない
-- 既存 `$transformed` がなければ `mkTransformedStub(dd)` を呼んでスタブを生成する
-- 収集した `stubs` をテンプレート本文末尾に追加する
+- `hasUnsupportedDirectCpsTransformParam(dd.symbol)` が true ならエラーを報告しスタブを生成しない。
+- `isMultiArgCpsContextFunctionTpe(dd.symbol.info)` が true（複数 context parameter の context function）ならエラーを報告しスタブを生成しない。
+- `generatedStubs: List[(String, Type)]` で生成済みスタブの（名前, 変換後型）ペアを追跡し、erased signature 衝突を検出する。衝突がある場合はエラーを報告しスタブを生成しない。
+- 既存 `$transformed` がなければ `mkTransformedStub(dd)` を呼んでスタブを生成する。
+- 収集した `stubs` をテンプレート本文末尾に追加する。
 
 ### テンプレート返却規則
 
@@ -171,7 +182,17 @@ private[plugin] def hasExistingTransformed(origSym: TermSymbol)(using Context): 
 private[plugin] def validateExistingTransformed(origSym: TermSymbol)(using Context): Boolean
 ```
 
-探索は `transformedOwner(origSym).info.decl(stubName).symbol` で行う。
+`hasExistingTransformed` は **alternatives ベース** で選択する（3段階）:
+
+1. `transformedOwner(origSym).info.decl(stubName).alternatives.map(_.symbol)` で候補を列挙。
+2. `candidates.find(_.info =:= expectedType)` でシグネチャ一致を優先。
+3. 見つからない場合は `candidates.filter(_.coord == origSym.coord)` で coord 一致が 1 件だけなら採用。
+
+`validateExistingTransformed` の判定:
+- **Synthetic**: そのまま true（重複生成を抑制するだけ、エラーなし）。
+- **非 Synthetic かつシグネチャ一致**: true（ユーザー手動実装として受理）。
+- **非 Synthetic かつシグネチャ不一致**: エラーを報告して true（スタブ生成を抑制して診断のみ）。
+- `None`: false（スタブを新規生成する）。
 
 ## 型・シンボルの扱い
 

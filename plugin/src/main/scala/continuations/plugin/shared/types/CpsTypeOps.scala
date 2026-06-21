@@ -39,30 +39,48 @@ trait CpsTypeOps extends CpsSymbols:
           false
 
   def isCpsValType(tpe: Type)(using Context): Boolean =
+    isCpsValType0(tpe, Set.empty)
+
+  // visited は apply member のシンボル id セット（scala.Symbol 名衝突を避けるため Int を使用）
+  private def isCpsValType0(tpe: Type, visited: Set[Int])(using Context): Boolean =
     val t = tpe.dealias.widen
     !isControlContextType(t) && (
       isCpsTransformFunctionType(t) ||
         (t match
           case rt: RefinedType =>
-            (rt.refinedName == nme.apply && isCpsValType(rt.refinedInfo)) ||
-            isCpsValType(rt.parent)
+            (rt.refinedName == nme.apply && isCpsValType0(rt.refinedInfo, visited)) ||
+            isCpsValType0(rt.parent, visited)
           case pt: PolyType =>
-            isCpsValType(pt.resType)
+            isCpsValType0(pt.resType, visited)
           case mt: MethodType =>
-            mt.paramInfos.exists(isCpsValType) || isCpsValType(mt.resType)
+            isCpsValType0(mt.resType, visited)
           case et: ExprType =>
-            isCpsValType(et.resultType)
+            isCpsValType0(et.resultType, visited)
           case _ =>
             false) ||
-        cpsApplyMember(t).nonEmpty ||
-        (isFunctionType(t) && t.argInfos.exists(isCpsValType)) ||
+        cpsApplyMember0(t, visited).nonEmpty ||
+        (isFunctionType(t) && t.argInfos.exists(isCpsValType0(_, visited))) ||
         (t match
           case app: AppliedType if !isFunctionType(t) =>
             val sym = app.tycon.typeSymbol
-            sym.isClass && !sym.is(Flags.Opaque) && app.args.exists(isCpsValType)
+            sym.isClass && !sym.is(Flags.Opaque) && app.args.exists(isCpsValType0(_, visited))
           case _ =>
             false)
     )
+
+  private def cpsApplyMember0(tpe: Type, visited: Set[Int])(using Context): Option[dotty.tools.dotc.core.Symbols.Symbol] =
+    val tSym = tpe.typeSymbol
+    if tSym.exists && visited.contains(tSym.id) then None
+    else
+      val newVisited = if tSym.exists then visited + tSym.id else visited
+      val memberDenot = tpe.dealias.widen.member(nme.apply)
+      val candidates =
+        if !memberDenot.exists then Nil
+        else
+          val overloads = memberDenot.alternatives.map(_.symbol)
+          if overloads.nonEmpty then overloads
+          else List(memberDenot.symbol)
+      candidates.find(sym => sym.exists && isCpsValType0(sym.info, newVisited))
 
   /** 値型中の CPS 型を ControlContext に変換する */
   def transformCpsValueType(tpe: Type)(using Context): Type =
@@ -142,3 +160,25 @@ trait CpsTypeOps extends CpsSymbols:
   /** ControlContext[?,?] 型かどうか */
   def isControlContextType(tpe: Type)(using Context): Boolean =
     tpe.widen.dealias.typeSymbol == controlContextClass
+
+  /** CpsTransform を他の context parameter と併用する context function 型かどうか。
+   *  (CpsTransform[R], String) ?=> A や (String, CpsTransform[R]) ?=> A を検出する。
+   *  CpsTransform の位置に依存しないよう argInfos 全体を走査する。
+   *  そのような型を保持するメソッドは変換未対応として診断する。
+   */
+  private[plugin] def isMultiArgCpsContextFunctionTpe(tpe: Type)(using Context): Boolean =
+    val t = tpe.dealias
+    val isContextFnWithMixedCps =
+      t.typeSymbol.fullName.toString.startsWith("scala.ContextFunction") && {
+        val params = t.argInfos.dropRight(1)  // 最後の要素は result type
+        params.size > 1 && params.exists(isCpsTransformType)
+      }
+    isContextFnWithMixedCps ||
+    (t match
+      case pt: PolyType => isMultiArgCpsContextFunctionTpe(pt.resType)
+      case mt: MethodType =>
+        mt.paramInfos.exists(isMultiArgCpsContextFunctionTpe) ||
+        isMultiArgCpsContextFunctionTpe(mt.resType)
+      case et: ExprType => isMultiArgCpsContextFunctionTpe(et.resultType)
+      case _ => false
+    )

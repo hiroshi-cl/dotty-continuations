@@ -8,7 +8,7 @@ import dotty.tools.dotc.reporting.StoreReporter
 
 class SelectiveCPSStubExistingTransformedSuite extends munit.FunSuite with SelectiveCPSStubPhaseSuiteBase:
 
-  test("hasExistingTransformed: manual $transformed definition reports error") {
+  test("hasExistingTransformed: manual $transformed with matching signature is accepted") {
     val freshReporter = new StoreReporter(null)
     given freshCtx: Context = ctx.fresh.setReporter(freshReporter)
     val orig = mkCpsArgDef("manual")(using freshCtx)
@@ -21,8 +21,8 @@ class SelectiveCPSStubExistingTransformedSuite extends munit.FunSuite with Selec
 
     val result = phase.validateExistingTransformed(orig.symbol.asTerm)(using freshCtx)
 
-    assert(result, "manual $transformed should be treated as existing")
-    assert(freshReporter.hasErrors, "manual $transformed should be rejected")
+    assert(result, "manual $transformed with matching signature should be treated as existing")
+    assert(!freshReporter.hasErrors, "manual $transformed with matching signature should not report an error")
     assertEquals(phase.hasExistingTransformed(orig.symbol.asTerm)(using freshCtx), Some(manualSym))
   }
 

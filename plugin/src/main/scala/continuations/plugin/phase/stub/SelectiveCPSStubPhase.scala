@@ -19,6 +19,34 @@ class SelectiveCPSStubPhase extends PluginPhase with CPSUtils:
   override val runsBefore: Set[String] = Set("pickler")
 
   override def transformTemplate(tree: Template)(using ctx: Context): Tree =
+    // 非 synthetic $transformed 定義をあらかじめ検証する
+    tree.body.foreach {
+      case dd: DefDef
+          if dd.symbol.name.toString.endsWith("$transformed") &&
+            !dd.symbol.is(Flags.Synthetic) =>
+        val origName = dd.symbol.name.toString.stripSuffix("$transformed").toTermName
+        val correspondingOriginals =
+          dd.symbol.owner.info.decl(origName).alternatives
+            .filter(alt => needsTransformedStub(alt.symbol) || needsTransformedMemberValStub(alt.symbol))
+        if correspondingOriginals.isEmpty then
+          report.error(
+            "manual $transformed definition requires a corresponding original CPS method",
+            dd.srcPos
+          )
+        else
+          val hasMatchingSignature = correspondingOriginals.exists(alt =>
+            dd.symbol.info =:= transformCpsMethodType(alt.symbol.info)
+          )
+          if !hasMatchingSignature then
+            val expected = correspondingOriginals
+              .map(alt => transformCpsMethodType(alt.symbol.info).show)
+              .mkString(" or ")
+            report.error(
+              s"manual $$transformed definition has incompatible signature; expected: $expected",
+              dd.srcPos
+            )
+      case _ => ()
+    }
     var hasInlineStubs = false
     var generatedMemberValStubNames = Set.empty[String]
     val bodyWithMemberValStubs = tree.body.flatMap {
@@ -53,13 +81,35 @@ class SelectiveCPSStubPhase extends PluginPhase with CPSUtils:
       case other =>
         List(other)
     }
+    // (stubName, transformedType) ペアを追跡し erased signature 衝突を検出する。
+    // =:= による比較は Scala 型レベルの重複を捉える。JVM erasure 後のみ衝突するケース
+    // (例: List[ControlContext[Int,Int]] と List[ControlContext[String,String]] が同じ erased signature になる場合)
+    // はここでは検出できないが、Dotty のバックエンドが ClassFormatError として報告する。
+    var generatedStubs = List.empty[(String, dotty.tools.dotc.core.Types.Type)]
     val stubs = tree.body.flatMap {
       case dd: DefDef if needsTransformedStub(dd.symbol) =>
         if hasUnsupportedDirectCpsTransformParam(dd.symbol) then
           report.error(UnsupportedDirectCpsTransformParamMessage, dd.srcPos)
           Nil
-        else if !validateExistingTransformed(dd.symbol.asTerm) then List(mkTransformedStub(dd))
-        else Nil
+        else if isMultiArgCpsContextFunctionTpe(dd.symbol.info) then
+          report.error(
+            "context function types with CpsTransform alongside other context parameters are not yet supported",
+            dd.srcPos
+          )
+          Nil
+        else
+          val stubName = dd.symbol.name.toString + "$transformed"
+          val expectedType = transformCpsMethodType(dd.symbol.info)
+          if generatedStubs.exists((n, t) => n == stubName && t =:= expectedType) then
+            report.error(
+              "transformed signature collides with another overload after CPS transformation; rename one of the original methods",
+              dd.srcPos
+            )
+            Nil
+          else
+            generatedStubs = (stubName, expectedType) :: generatedStubs
+            if !validateExistingTransformed(dd.symbol.asTerm) then List(mkTransformedStub(dd))
+            else Nil
       case _ =>
         Nil
     }
@@ -68,16 +118,27 @@ class SelectiveCPSStubPhase extends PluginPhase with CPSUtils:
 
   private[plugin] def hasExistingTransformed(origSym: TermSymbol)(using Context): Option[Symbol] =
     val stubName = (origSym.name.toString + "$transformed").toTermName
-    val sym = transformedOwner(origSym).info.decl(stubName).symbol
-    Option.when(sym.exists)(sym)
+    val candidates = transformedOwner(origSym).info.decl(stubName).alternatives.map(_.symbol)
+    val expectedType = transformCpsMethodType(origSym.info)
+    candidates.find(_.info =:= expectedType).orElse(
+      candidates.filter(_.coord == origSym.coord) match
+        case single :: Nil => Some(single)
+        case _             => None
+    )
 
   private[plugin] def validateExistingTransformed(origSym: TermSymbol)(using Context): Boolean =
     hasExistingTransformed(origSym) match
-      case Some(sym) if !sym.is(Flags.Synthetic) =>
-        report.error("manual $transformed definition is not supported", sym.srcPos)
+      case Some(sym) if sym.is(Flags.Synthetic) =>
         true
-      case Some(_) =>
-        true
+      case Some(sym) =>
+        val expectedType = transformCpsMethodType(origSym.info)
+        if sym.info =:= expectedType then true
+        else
+          report.error(
+            s"manual $$transformed definition has incompatible signature; expected: ${expectedType.show}",
+            sym.srcPos
+          )
+          true
       case None =>
         false
 

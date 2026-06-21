@@ -14,7 +14,7 @@ trait CpsEligibility:
       !sym.is(Flags.Accessor) &&
       !sym.is(Flags.Inline) &&
       !sym.isConstructor &&
-      !sym.name.toString.startsWith("$anonfun") &&
+      !(sym.name.toString.startsWith("$anonfun") && sym.is(Flags.Synthetic)) &&
       !sym.name.toString.endsWith("$transformed") && (
         hasCpsTransformParam(sym) ||
           hasCpsTransformFunctionParam(sym) ||

@@ -59,11 +59,37 @@ trait LocalTransformRegistryOps:
             if hasUnsupportedDirectCpsTransformParam(dd.symbol) then
               report.error(UnsupportedDirectCpsTransformParamMessage, dd.srcPos)
             else if needsLocalTransformedStub(dd.symbol) then
-              registerLocalTransform(dd)
-              localPlanFor(dd.symbol.asTerm).foreach(plan => originalDefsByTransformed(plan.transformedSym) = dd)
+              // reset body closure ($anonfun + Synthetic + CpsTransform param) 内の local def は未サポート
+              val ownerIsResetClosure =
+                dd.symbol.owner.name.toString.startsWith("$anonfun") &&
+                  dd.symbol.owner.is(Flags.Synthetic) &&
+                  hasCpsTransformParam(dd.symbol.owner)
+              if ownerIsResetClosure then
+                report.error(
+                  "local CPS def inside reset body is not yet supported; move it outside the reset block",
+                  dd.srcPos
+                )
+              else if isMultiArgCpsContextFunctionTpe(dd.symbol.info) then
+                report.error(
+                  "context function types with CpsTransform alongside other context parameters are not yet supported",
+                  dd.srcPos
+                )
+              else
+                registerLocalTransform(dd)
+                localPlanFor(dd.symbol.asTerm).foreach(plan => originalDefsByTransformed(plan.transformedSym) = dd)
             else
+              val tname = (dd.symbol.name.toString + "$transformed").toTermName
+              val candidates = dd.symbol.owner.info.decl(tname).alternatives.map(_.symbol)
+              val expectedType = transformCpsMethodType(dd.symbol.info)
               val transformedSym =
-                dd.symbol.owner.info.decl((dd.symbol.name.toString + "$transformed").toTermName).symbol
+                candidates.find(_.info =:= expectedType).getOrElse(
+                  candidates.filter(_.coord == dd.symbol.coord) match
+                    case single :: Nil => single
+                    case _ =>
+                      candidates match
+                        case List(single) => single
+                        case _            => NoSymbol
+                )
               if transformedSym.exists then originalDefsByTransformed(transformedSym) = dd
             traverseChildren(tree)
           case vd: ValDef =>
@@ -152,16 +178,24 @@ trait LocalTransformRegistryOps:
   protected def registerLocalValTransform(originalVal: ValDef)(using Context): Unit =
     val origSym = originalVal.symbol.asTerm
     if !localValPlansByOriginal.contains(origSym) then
-      val polyApplyPlan = findPolyApplyDef(originalVal.rhs).map { applyDef =>
-        val transformedApplySym = newSymbol(
-          applyDef.symbol.owner,
-          PolyApplyTransformedName,
-          applyDef.symbol.flags | Flags.Synthetic,
-          transformCpsMethodType(applyDef.symbol.info),
-          coord = applyDef.symbol.coord
-        ).asTerm.entered
-        polyApplyPlansByClass(applyDef.symbol.owner) = (applyDef, transformedApplySym)
-        (applyDef, transformedApplySym)
+      val polyApplyPlan = findPolyApplyDef(originalVal.rhs).flatMap { applyDef =>
+        val allApplyDefs = findAllPolyApplyDefs(originalVal.rhs)
+        if allApplyDefs.size > 1 then
+          report.error(
+            "multiple CPS-valued apply overloads on a single class are not yet supported; use a single apply overload",
+            originalVal.srcPos
+          )
+          None
+        else
+          val transformedApplySym = newSymbol(
+            applyDef.symbol.owner,
+            PolyApplyTransformedName,
+            applyDef.symbol.flags | Flags.Synthetic,
+            transformCpsMethodType(applyDef.symbol.info),
+            coord = applyDef.symbol.coord
+          ).asTerm.entered
+          polyApplyPlansByClass(applyDef.symbol.owner) = (applyDef, transformedApplySym)
+          Some((applyDef, transformedApplySym))
       }
       val transformedSym = newSymbol(
         origSym.owner,

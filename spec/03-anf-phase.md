@@ -55,11 +55,27 @@ override val runsBefore: Set[String] = Set("firstTransform")
 
 **`Match(sel, cases)`**
 
-selector は inline 位置なので `transformInline` で変換する。各 case body は tail 位置なので `transformTail` で変換し、case body を `mkBlock(bodyStmts, newBody)` に置換する。selector から出た文は `match` の前に置く。case guard は変換しない。`shiftUnitR`（純粋値の lift）は CPS フェーズが担う。
+まず `cases.exists(cd => !cd.guard.isEmpty && containsCpsExpr(cd.guard))` を検査する。guard に CPS 式が含まれる場合は、該当 guard ごとに `"shift in match guard is not supported"` エラーを報告し、`(Nil, tree)` を返して変換を打ち切る。
+
+guard に CPS が含まれない場合、selector は inline 位置として `transformInline` で変換する。各 case body は tail 位置として `transformTail` で変換し、case body を `mkBlock(bodyStmts, newBody)` に置換する。`shiftUnitR`（純粋値の lift）は CPS フェーズが担う。
 
 **`Apply(fun, args)`**
 
-`fun` が `Select(qual, name)` の場合、qualifier は inline 位置として `transformInline` し、`cpy.Select(fun)(newQual, name)` に戻す。それ以外の `fun` は tail 位置として `transformTail` する。全 `args` は inline 位置として `transformInline` し、抽出文を順に連結して `cpy.Apply(tree)(newFun, newArgs)` に戻す。
+まず `tryDesugarBooleanShortCircuit(fun, args)` を試みる。`Boolean.&&`/`Boolean.||` の呼び出しで RHS に CPS 式が含まれる場合、短絡評価を維持するために `If` に脱糖する：
+
+- `&&`: `(qualStmts, If(newQual, mkBlock(rhsStmts, newRhs), Literal(false)))`
+- `||`: `(qualStmts, If(newQual, Literal(true), mkBlock(elseStmts, newElse)))`
+
+`None` が返った場合（通常の Apply）は以下を実行する：
+
+- `fun` が `Select(qual, name)` の場合、qualifier は inline 位置として `transformInline` し、`cpy.Select(fun)(newQual, name)` に戻す。それ以外の `fun` は tail 位置として `transformTail` する。
+- `applyClauseParamInfos(fun.tpe)` で現在 Apply clause の `paramInfos` を取得する（`PolyType` は `resType` を再帰して `MethodType` を探す）。
+- 各引数 `args(i)` に対して:
+  - `paramInfos.exists(ps => i < ps.size && ps(i).isInstanceOf[ExprType])` が true なら by-name 引数:
+    - CPS 式が含まれる場合は `"shift inside a by-name argument is not supported"` エラーを報告し、元の引数を返す。
+    - CPS 式が含まれない場合は `transformTail` し、`(Nil, mkBlock(argStmts, newArg))` を返す（by-name 境界を超えてホイストしない）。
+  - それ以外は通常の inline 位置として `transformInline` する。
+- 抽出文を連結し `cpy.Apply(tree)(newFun, newArgs)` に戻す。
 
 **`TypeApply(fun, targs)`**
 
@@ -75,11 +91,15 @@ qualifier を inline 位置として `transformInline` し、`cpy.Select(tree)(n
 
 **`Try(body, cases, finalizer)`**
 
-`containsCpsExpr(tree)` が偽なら変換せず `(Nil, tree)` を返す。真なら、`finalizer` に CPS 式が含まれる場合は `shift in finally is not supported` エラーを出す。body は tail 位置として `transformTail` し、各 case body も tail 位置として `transformTail` する。finalizer 自体は変換せずそのまま渡す。結果は `cpy.Try(tree)(mkBlock(bodyStmts, newBody), newCases, finalizer)`。`mapFinally` に相当するメソッドは存在しない。
+`containsCpsExpr(tree)` が偽なら変換せず `(Nil, tree)` を返す。真なら、`finalizer` に CPS 式が含まれる場合は `"shift in finally is not supported"` エラーを出す。次に、catch clause の guard に CPS 式が含まれる場合は `"shift in match guard is not supported"` エラーを各 guard ごとに報告し、`(Nil, tree)` を返す。guard に CPS がない場合、body は tail 位置として `transformTail` し、各 case body も tail 位置として `transformTail` する。finalizer 自体は変換せずそのまま渡す。結果は `cpy.Try(tree)(mkBlock(bodyStmts, newBody), newCases, finalizer)`。
 
 **`WhileDo(_, _)`**
 
 `containsCpsExpr(tree)` が真ならエラーを出す。変換はせず `(Nil, tree)` を返す。
+
+**`SeqLiteral(elems, elemtpt)`**
+
+varargs 展開後の `SeqLiteral` ノードを処理する。各要素は inline 位置として `transformInline` し、抽出文を連結して `cpy.SeqLiteral(sl)(newElems, sl.elemtpt)` に戻す。これにより varargs 内の CPS 式が source 順で ANF 抽出される。
 
 **その他**
 
